@@ -72,6 +72,19 @@ window.__ModuleLoader__.load({
       '测试中…': 'Testing…',
       '测试连接': 'Test connection',
       '备份中…': 'Backing up…',
+      '正在采集文件': 'Collecting files',
+      '正在打包加密': 'Packing & encrypting',
+      '正在检查远端': 'Checking the remote',
+      '正在上传': 'Uploading',
+      '正在写入快照索引': 'Writing the snapshot index',
+      '正在清理旧快照': 'Pruning old snapshots',
+      '正在保存状态': 'Saving state',
+      '完成': 'Done',
+      '失败': 'Failed',
+      '最近备份日志': 'Recent backup log',
+      '最近 {n} 条同步日志（~/.dsh/dsh-sync/sync.log）。': 'Last {n} sync log entries (~/.dsh/dsh-sync/sync.log).',
+      '暂无日志': 'No log entries yet',
+      '刷新日志': 'Refresh log',
       '立即备份': 'Back up now',
       '从云端恢复': 'Restore from the cloud',
       '点此复制': 'click to copy',
@@ -306,6 +319,18 @@ window.__ModuleLoader__.load({
       return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
     }
 
+    /** 一行日志：时间 · 事件 · 阶段/百分比/耗时。 */
+    function logLine(entry) {
+      const time = entry.at ? new Date(entry.at).toLocaleTimeString() : '';
+      const parts = [time, entry.op ?? entry.raw ?? ''];
+      if (entry.stage) parts.push(`@${entry.stage}`);
+      if (entry.error) parts.push(entry.error);
+      else if (entry.percent !== undefined) parts.push(`${entry.percent}%`);
+      else if (entry.bytes !== undefined) parts.push(bytesText(entry.bytes));
+      if (entry.elapsedMs !== undefined) parts.push(`${(entry.elapsedMs / 1000).toFixed(1)}s`);
+      return parts.filter(Boolean).join(' · ');
+    }
+
     function Field(props) {
       return h(
         'label',
@@ -385,14 +410,36 @@ window.__ModuleLoader__.load({
       return h('div', { className: `dshsync-note ${props.feedback.tone}` }, props.feedback.text);
     }
 
-    /** 长操作阶段指示（无百分比，只有阶段文案 + 转圈）。 */
+    /** 长操作阶段指示：有字节进度时显示百分比、总量与进度条。 */
     function Progress(props) {
-      if (!props.stage) return null;
+      const progress = props.progress;
+      const labels = {
+        collect: t('正在采集文件'),
+        pack: t('正在打包加密'),
+        check: t('正在检查远端'),
+        seal: t('正在打包加密'),
+        upload: t('正在上传'),
+        latest: t('正在写入快照索引'),
+        prune: t('正在清理旧快照'),
+        state: t('正在保存状态'),
+        done: t('完成'),
+        error: t('失败'),
+      };
+      const stageText = progress?.stage ? (labels[progress.stage] ?? String(progress.stage)) : '';
+      const active = progress?.stage && progress.stage !== 'done';
+      const text = props.stage || (active ? stageText : '');
+      if (!text && !progress?.error) return null;
+      const total = Number(progress?.total ?? 0);
+      const sent = Number(progress?.sent ?? 0);
+      const percent = total > 0 ? Math.min(100, Math.round((sent / total) * 100)) : null;
       return h(
         'div',
         { className: 'dshsync-progress', role: 'status' },
         h('span', { className: 'dshsync-spinner', 'aria-hidden': true }),
-        h('span', null, props.stage),
+        h('span', null, text),
+        percent !== null ? h('span', { className: 'dshsync-progress-track' }, h('span', { className: 'dshsync-progress-fill', style: { width: `${percent}%` } })) : null,
+        percent !== null ? h('span', { className: 'dshsync-progress-num' }, `${percent}% · ${bytesText(sent)} / ${bytesText(total)}`) : null,
+        progress?.error ? h('span', { className: 'dshsync-progress-error' }, progress.error) : null,
       );
     }
 
@@ -421,6 +468,8 @@ window.__ModuleLoader__.load({
       const [privacyAck, setPrivacyAck] = useState({}); // moduleId -> true
       const [showAllPlan, setShowAllPlan] = useState(false);
       const [dirty, setDirty] = useState(false);
+      const [progress, setProgress] = useState(null);
+      const [logs, setLogs] = useState([]);
       const formRef = useRef(form);
       formRef.current = form;
 
@@ -517,6 +566,35 @@ window.__ModuleLoader__.load({
         refresh().catch((error) => setNotice({ tone: 'err', text: t('读取状态失败：{message}', { message: error.message }) }));
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, []);
+
+      // 备份进度：Host 每推进一步都会更新 engine.progress，这里轻量轮询（1.5 秒）。
+      useEffect(() => {
+        let alive = true;
+        let timer;
+        const poll = async () => {
+          try {
+            const value = await call('progress');
+            if (alive) setProgress(value.progress ?? null);
+          } catch {
+            /* 轮询失败不打扰页面 */
+          }
+          if (alive) timer = setTimeout(poll, 1500);
+        };
+        poll();
+        return () => {
+          alive = false;
+          clearTimeout(timer);
+        };
+      }, []);
+
+      const loadLogs = useCallback(async () => {
+        const value = await call('logs', { limit: 40 });
+        setLogs([...(value.entries ?? [])].reverse());
+      }, []);
+
+      useEffect(() => {
+        if (tab === 'advanced') loadLogs().catch(() => {});
+      }, [tab, loadLogs]);
 
       // 每次切到「恢复 / 导入」页签都重拉快照列表：用户可能刚在「备份」页
       // 改了目标配置并保存（换机场景的核心路径），列表必须反映当前已保存的目标。
@@ -1055,7 +1133,7 @@ window.__ModuleLoader__.load({
             h(Button, { onClick: onTest, disabled: Boolean(busy) }, busy === 'test' ? t('测试中…') : t('测试连接')),
             h(Button, { primary: true, onClick: onPush, disabled: Boolean(busy) }, busy === 'push' ? t('备份中…') : t('立即备份')),
           ),
-          h(Progress, { stage: busy === 'push' || busy === 'test' || busy === 'save' ? stage : '' }),
+          h(Progress, { stage: busy === 'push' || busy === 'test' || busy === 'save' ? stage : '', progress }),
           h(Feedback, { feedback: feedback.save }),
           h(Feedback, { feedback: feedback.test }),
           h(Feedback, { feedback: feedback.push }),
@@ -1126,7 +1204,7 @@ window.__ModuleLoader__.load({
             h(Button, { onClick: onRefreshSnapshots, disabled: Boolean(busy) }, busy === 'snapshots' ? t('读取中…') : t('刷新列表')),
             h(Button, { primary: true, onClick: onPreview, disabled: Boolean(busy) || !selectedSnapshot }, busy === 'preview' ? t('读取中…') : t('预览选中的快照')),
           ),
-          h(Progress, { stage: busy === 'preview' ? stage : '' }),
+          h(Progress, { stage: busy === 'preview' ? stage : '', progress }),
           h(Feedback, { feedback: feedback.snapshots }),
           h(Feedback, { feedback: feedback.preview }),
         ),
@@ -1151,7 +1229,7 @@ window.__ModuleLoader__.load({
             h(Button, { onClick: () => onPick('folder'), disabled: Boolean(busy) }, busy === 'pick-folder' ? t('等待选择…') : t('选择文件夹…')),
             h(Button, { primary: true, onClick: onPreviewFile, disabled: Boolean(busy) || !filePath.trim() }, busy === 'previewFile' ? t('读取中…') : t('预览这个文件')),
           ),
-          h(Progress, { stage: busy === 'previewFile' ? stage : '' }),
+          h(Progress, { stage: busy === 'previewFile' ? stage : '', progress }),
           h(Feedback, { feedback: feedback['pick-file'] }),
           h(Feedback, { feedback: feedback['pick-folder'] }),
           h(Feedback, { feedback: feedback.previewFile }),
@@ -1214,7 +1292,7 @@ window.__ModuleLoader__.load({
                         h(Button, { primary: true, danger: confirmRestore, onClick: confirmRestore ? onApply : () => setConfirmRestore(true), disabled: Boolean(busy) }, busy === 'apply' ? t('恢复中…') : confirmRestore ? t('确认：覆盖这些文件') : t('确认恢复到本机')),
                         h(Button, { onClick: () => { setPlan(null); setConfirmRestore(false); } }, t('取消')),
                       ),
-                      h(Progress, { stage: busy === 'apply' ? stage : '' }),
+                      h(Progress, { stage: busy === 'apply' ? stage : '', progress }),
                     )
                   : null,
               h(Feedback, { feedback: feedback.apply }),
@@ -1303,6 +1381,21 @@ window.__ModuleLoader__.load({
           h(Row, { label: t('插件数据'), value: status?.paths?.data ?? '~/.dsh/dsh-sync' }),
           h('p', { className: 'dshsync-foot' }, t('配置以密文保存在 ~/.dsh/dsh-sync/config.json；日志在 ~/.dsh/dsh-sync/sync.log；恢复前被覆盖的文件备份在 ~/.dsh/dsh-sync/backups/。')),
         ),
+
+        h(
+          'section',
+          { className: 'dshsync-card' },
+          h('h3', null, t('最近备份日志')),
+          h('p', { className: 'dshsync-hint' }, t('最近 {n} 条同步日志（~/.dsh/dsh-sync/sync.log）。', { n: logs.length })),
+          logs.length === 0
+            ? h('div', { className: 'dshsync-note' }, t('暂无日志'))
+            : h(
+                'ul',
+                { className: 'dshsync-list dshsync-loglist' },
+                logs.map((entry, index) => h('li', { key: `${entry.at ?? ''}-${index}` }, logLine(entry))),
+              ),
+          h('div', { className: 'dshsync-actions' }, h(Button, { onClick: () => loadLogs().catch(() => {}) }, t('刷新日志'))),
+        ),
       );
 
       return h(
@@ -1369,7 +1462,12 @@ window.__ModuleLoader__.load({
 .dshsync-note.warn { border-left-color: var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-state-warn-primary); }
 .dshsync-note.err { border-left-color: var(--dsw-alias-state-error-primary); color: var(--dsw-alias-state-error-primary); }
 .dshsync-note.toast { position: sticky; top: 8px; z-index: 30; box-shadow: 0 4px 16px rgba(0,0,0,.15); }
-.dshsync-progress { display: flex; align-items: center; gap: 8px; color: var(--dsw-alias-label-secondary); font-size: 12px; margin-bottom: 10px; }
+.dshsync-progress { display: flex; align-items: center; gap: 8px; color: var(--dsw-alias-label-secondary); font-size: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.dshsync-progress-track { flex: 1; min-width: 120px; height: 6px; border-radius: 3px; background: var(--dsw-alias-bg-layer-2); overflow: hidden; }
+.dshsync-progress-fill { display: block; height: 100%; background: var(--dsw-alias-brand-primary); transition: width .3s ease; }
+.dshsync-progress-num { font-variant-numeric: tabular-nums; }
+.dshsync-progress-error { color: var(--dsw-alias-state-error-primary); }
+.dshsync-loglist { max-height: 220px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
 .dshsync-spinner { width: 12px; height: 12px; border: 2px solid var(--dsw-alias-border-l2); border-top-color: var(--dsw-alias-brand-primary); border-radius: 50%; animation: dshsync-spin .8s linear infinite; }
 @keyframes dshsync-spin { to { transform: rotate(360deg); } }
 .dshsync-dirtybar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; background: var(--dsw-alias-bg-layer-2); border-left: 3px solid var(--dsw-alias-state-warn-primary); border-radius: 6px; padding: 8px 12px; font-size: 12px; margin-bottom: 10px; color: var(--dsw-alias-label-secondary); }

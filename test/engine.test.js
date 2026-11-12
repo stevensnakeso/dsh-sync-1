@@ -71,6 +71,12 @@ test('push, status, prune, restore and credentials merge', async (t) => {
   assert.match(first.key, /^snapshots\/[A-Za-z0-9._-]+_\d{8}T\d{6}Z_[0-9a-f]+\.dshsync$/, first.key);
   assert.ok(first.key.split('/')[1].startsWith(`${os.hostname().replace(/[^A-Za-z0-9._-]+/g, '-')}_`), 'snapshot name carries the machine name');
   assert.ok(first.stats.files >= 4);
+  assert.equal(env.engine.progress?.stage, 'done', 'progress ends in done');
+  assert.equal(env.engine.progress?.sent, first.bytes, 'progress reports all bytes uploaded');
+  const pushLog = await fs.readFile(path.join(env.dshHome, 'dsh-sync', 'sync.log'), 'utf8');
+  for (const op of ['push.start', 'push.collect', 'push.upload.start', 'push.upload.done', 'push']) {
+    assert.ok(pushLog.includes(`"op":"${op}"`), `log contains ${op}`);
+  }
 
   const latestRaw = await fs.readFile(path.join(env.remote, 'dsh-sync', 'latest.json'), 'utf8');
   const latest = JSON.parse(latestRaw);

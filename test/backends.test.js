@@ -178,6 +178,15 @@ test('WebDAV backend creates collections, round-trips and lists', async (t) => {
         res.writeHead(404).end();
         return;
       }
+      const range = req.headers.range?.match(/bytes=(\d+)-(\d+)/);
+      if (range) {
+        const start = Number(range[1]);
+        const end = Math.min(Number(range[2]), value.length - 1);
+        const slice = value.subarray(start, end + 1);
+        res.writeHead(206, { 'content-length': String(slice.length), 'content-range': `bytes ${start}-${end}/${value.length}` });
+        res.end(req.method === 'HEAD' ? undefined : slice);
+        return;
+      }
       res.writeHead(200, { 'content-length': String(value.length) });
       res.end(req.method === 'HEAD' ? undefined : value);
       return;
@@ -208,6 +217,7 @@ test('WebDAV backend creates collections, round-trips and lists', async (t) => {
   await backend.put('snapshots/x.dshsync', Buffer.from('dav body'), 'application/octet-stream');
   assert.ok(store.has('/dav/dsh-sync/snapshots/x.dshsync'));
   assert.equal((await backend.get('snapshots/x.dshsync')).toString(), 'dav body');
+  assert.equal((await backend.get('snapshots/x.dshsync', { range: { start: 0, end: 2 } })).toString(), 'dav', 'Range GET returns 206 slice');
   const listed = await backend.list('snapshots/');
   assert.deepEqual(listed.map((item) => item.key), ['x.dshsync']);
   assert.equal((await backend.head('snapshots/x.dshsync')).size, 8);
